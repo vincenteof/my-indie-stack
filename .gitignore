@@ -3,3 +3,14 @@ node_modules
 /.cache
 /build
 .env
+
+bun.lockb
+package-lock.json
+pnpm-lock.yaml
+pnpm-lock.yml
+yarn.lock
+
+/cypress/screenshots
+/cypress/videos
+/prisma/data.db
+/prisma/data.db-journal
