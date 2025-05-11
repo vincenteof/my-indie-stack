@@ -14,3 +14,5 @@ yarn.lock
 /cypress/videos
 /prisma/data.db
 /prisma/data.db-journal
+/prisma/dev.db
+/prisma/dev.db-journal
