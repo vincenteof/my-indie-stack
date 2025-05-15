@@ -1,61 +1,80 @@
-# base node image
-FROM node:18-bullseye-slim as base
+# === Base image with Node 20 and pnpm support ===
+FROM node:20-bullseye-slim AS base
 
-# set for base and all layer that inherit from it
-ENV NODE_ENV production
+ENV NODE_ENV=production
 
-# Install openssl for Prisma
-RUN apt-get update && apt-get install -y openssl sqlite3
+RUN apt-get update \
+ && apt-get install -y openssl sqlite3 \
+ && corepack enable \
+ && corepack prepare pnpm@latest --activate \
+ && rm -rf /var/lib/apt/lists/*
 
-# Install all node_modules, including dev dependencies
-FROM base as deps
-
-WORKDIR /myapp
-
-ADD package.json .npmrc ./
-RUN npm install --include=dev
-
-# Setup production node_modules
-FROM base as production-deps
+# === Install & generate Prisma client ===
+FROM base AS deps
 
 WORKDIR /myapp
 
-COPY --from=deps /myapp/node_modules /myapp/node_modules
-ADD package.json .npmrc ./
-RUN npm prune --omit=dev
+# copy manifest + lockfile
+COPY package.json pnpm-lock.yaml ./
 
-# Build the app
-FROM base as build
+# install everything (dev + prod)
+RUN pnpm install
+
+# Prisma schema & client generation
+COPY prisma ./prisma
+RUN pnpm prisma generate
+
+# === Prune dev‑deps for a minimal node_modules ===
+FROM base AS production-deps
 
 WORKDIR /myapp
 
-COPY --from=deps /myapp/node_modules /myapp/node_modules
+# bring in manifest + lockfile (to keep prune deterministic)
+COPY package.json pnpm-lock.yaml ./
 
-ADD prisma .
-RUN npx prisma generate
+# pull in built node_modules (with generated Prisma client)
+COPY --from=deps /myapp/node_modules ./node_modules
 
-ADD . .
-RUN npm run build
+# remove devDependencies
+RUN pnpm prune --prod
 
-# Finally, build the production image with minimal footprint
-FROM base
+# === Build your app (reusing full deps) ===
+FROM base AS build
 
-ENV DATABASE_URL=file:/data/sqlite.db
+WORKDIR /myapp
+
+# copy manifest + lockfile (optional but keeps consistency)
+COPY package.json pnpm-lock.yaml ./
+
+# reuse full deps (with generated Prisma client)
+COPY --from=deps /myapp/node_modules ./node_modules
+
+# copy source & build
+COPY . .
+RUN pnpm run build
+
+# === Final runtime image ===
+FROM base AS runtime
+
+ENV DATABASE_URL="file:/data/sqlite.db"
 ENV PORT="8080"
 ENV NODE_ENV="production"
 
-# add shortcut for connecting to database CLI
-RUN echo "#!/bin/sh\nset -x\nsqlite3 \$DATABASE_URL" > /usr/local/bin/database-cli && chmod +x /usr/local/bin/database-cli
+# sqlite shortcut
+RUN echo "#!/bin/sh\nset -x\nsqlite3 \$DATABASE_URL" \
+    > /usr/local/bin/database-cli \
+ && chmod +x /usr/local/bin/database-cli
 
 WORKDIR /myapp
 
-COPY --from=production-deps /myapp/node_modules /myapp/node_modules
-COPY --from=build /myapp/node_modules/.prisma /myapp/node_modules/.prisma
+# production deps only
+COPY --from=production-deps /myapp/node_modules ./node_modules
 
-COPY --from=build /myapp/build /myapp/build
-COPY --from=build /myapp/public /myapp/public
-COPY --from=build /myapp/package.json /myapp/package.json
-COPY --from=build /myapp/start.sh /myapp/start.sh
-COPY --from=build /myapp/prisma /myapp/prisma
+# copy build output and static assets
+COPY --from=build /myapp/build ./build
+COPY --from=build /myapp/public ./public
+COPY --from=build /myapp/package.json ./package.json
+COPY --from=build /myapp/start.sh ./start.sh
+COPY --from=build /myapp/prisma ./prisma
 
-ENTRYPOINT [ "./start.sh" ]
+ENTRYPOINT ["./start.sh"]
